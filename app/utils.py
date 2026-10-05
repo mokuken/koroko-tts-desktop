@@ -188,10 +188,15 @@ def format_time(seconds: float) -> str:
 
 
 def default_filename(extension: str = ".wav") -> str:
-    """narration_2026-10-05_2330.wav"""
+    """narration_2026-10-05_233045.wav
+
+    Seconds are included on purpose. With minute resolution, two renders within
+    the same minute resolve to the same path, so the second write overwrites the
+    first - and if the audio player still holds that file open, the write fails.
+    """
     from datetime import datetime
 
-    return "narration_" + datetime.now().strftime("%Y-%m-%d_%H%M") + extension
+    return "narration_" + datetime.now().strftime("%Y-%m-%d_%H%M%S") + extension
 
 
 def format_size(num_bytes: float) -> str:

@@ -169,15 +169,9 @@ def apply_style(root: tk.Misc) -> ttk.Style:
     root.option_add("*TCombobox*Listbox.selectBackground", SELECT)
     root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
 
-    style.configure(
-        "Dark.Horizontal.TProgressbar",
-        background=ACCENT,
-        troughcolor=SURFACE_ALT,
-        bordercolor=SURFACE_ALT,
-        lightcolor=ACCENT,
-        darkcolor=ACCENT,
-        thickness=4,
-    )
+    # The footer progress rail is drawn on a Canvas rather than styled here:
+    # clam's progressbar trough element ignores `thickness`, so ttk always
+    # reserves 18px no matter how thin it is told to be. See gui.FooterProgress.
     style.configure(
         "Dark.Horizontal.TScale",
         background=BG,

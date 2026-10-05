@@ -30,6 +30,49 @@ META_DEBOUNCE_MS = 150
 # --------------------------------------------------------------------------- #
 # small widgets
 # --------------------------------------------------------------------------- #
+class FooterProgress(tk.Canvas):
+    """A hairline progress rail for the status footer.
+
+    ttk's progressbar cannot be made this thin: clam's trough element ignores
+    ``thickness``, so it reserves 18px regardless. Drawing two rectangles gives
+    exact control over the height and matches the borderless footer.
+    """
+
+    MIN_VISIBLE = 2.0  # px of fill shown for any non-zero progress
+
+    def __init__(self, master, thickness: int = 3, **kwargs):
+        kwargs.setdefault("bg", theme.SURFACE)
+        kwargs.setdefault("height", thickness)
+        kwargs.setdefault("highlightthickness", 0)
+        kwargs.setdefault("borderwidth", 0)
+        kwargs.setdefault("takefocus", 0)
+        super().__init__(master, width=110, **kwargs)
+        self._thickness = thickness
+        self._value = 0.0
+        self._trough = self.create_rectangle(
+            0, 0, 1, thickness, fill=theme.SURFACE_ALT, outline=""
+        )
+        self._fill = self.create_rectangle(0, 0, 0, thickness, fill=theme.ACCENT, outline="")
+        self.bind("<Configure>", lambda _e: self._redraw())
+
+    @property
+    def value(self) -> float:
+        return self._value
+
+    def set_value(self, percent: float) -> None:
+        self._value = max(0.0, min(100.0, float(percent)))
+        self._redraw()
+
+    def _redraw(self) -> None:
+        width = max(1, self.winfo_width())
+        height = self._thickness
+        self.coords(self._trough, 0, 0, width, height)
+        filled = width * (self._value / 100.0)
+        if 0.0 < self._value < 100.0:
+            filled = max(self.MIN_VISIBLE, filled)
+        self.coords(self._fill, 0, 0, filled, height)
+
+
 class TransportIcon(tk.Canvas):
     """Font-independent play/pause/stop icon that doubles as a button."""
 
@@ -128,6 +171,7 @@ class TTSApp:
         self._suppress_scale = False
         self._meta_job: str | None = None
         self._speed_values = self._speed_choices()
+        self._tick_count = 0
 
         root.title(utils.APP_NAME)
         root.minsize(640, 620)
@@ -141,6 +185,11 @@ class TTSApp:
         self.root.after(TICK_MS, self._tick)
 
     # -- geometry ------------------------------------------------------------ #
+    @property
+    def tick_count(self) -> int:
+        """Timer frames served. Stops advancing if the event loop ever dies."""
+        return self._tick_count
+
     def _speed_choices(self) -> list[float]:
         values = list(SPEED_CHOICES)
         try:
@@ -294,13 +343,6 @@ class TTSApp:
             actions, text="Cancel", style="Ghost.TButton", command=self._on_cancel
         )
 
-        self._progress = ttk.Progressbar(
-            self._content, style="Dark.Horizontal.TProgressbar", mode="determinate",
-            maximum=100, value=0,
-        )
-        self._progress.pack(fill="x", padx=pad, pady=(10, 0))
-        self._progress.pack_forget()
-
         # -- player -- #
         self._build_player(fonts)
 
@@ -375,6 +417,22 @@ class TTSApp:
             bar, text="", bg=theme.SURFACE, fg=theme.TEXT_FAINT, font=fonts["tiny"],
         )
         self._engine_label.pack(side="right")
+
+        # Thin progress rail between the status text and the engine label.
+        # Only visible while generating; packed away the moment it finishes so
+        # the footer always reads as a plain status line when idle.
+        self._progress = FooterProgress(bar, thickness=3)
+        self._progress.pack_forget()  # revealed by _show_progress only
+
+    def _show_progress(self, value: float) -> None:
+        """Reveal the footer rail and move it to ``value`` percent."""
+        self._progress.set_value(value)
+        self._progress.pack(side="left", fill="x", expand=True, padx=(12, 12))
+
+    def _hide_progress(self) -> None:
+        if self._progress.winfo_manager():
+            self._progress.pack_forget()
+        self._progress.set_value(0)
 
     # -- model-missing view -------------------------------------------------- #
     def _build_missing_view(self, status: model_manager.ModelStatus) -> None:
@@ -564,11 +622,13 @@ class TTSApp:
         self._player_reset()
         self._cancel.clear()
         self._set_busy(True)
-        self._progress.configure(value=0)
-        self._progress.pack(fill="x", padx=theme.PAD, pady=(10, 0))
+        self._show_progress(0)
         self._set_status("Preparing...", theme.ACCENT)
 
-        voice = self.config.voice or (model_manager.default_voice() or "")
+        # Prefer the live widget values over config: they are what the user is
+        # looking at, and they cannot drift from the visible selection.
+        voice = (self._voice_combo.get() or "").strip() or self.config.voice
+        voice = voice or (model_manager.default_voice() or "")
         language = self.config.language
         if language not in AVAILABLE_LANGS:
             language = "en"
@@ -617,8 +677,7 @@ class TTSApp:
             self._speed_combo.configure(state="readonly")
             self._language_combo.configure(state="readonly")
             self.root.config(cursor="")
-            if not self._progress.winfo_manager():
-                self._progress.pack_forget()
+            self._hide_progress()
             self._update_meta()
 
     def _on_cancel(self) -> None:
@@ -633,17 +692,28 @@ class TTSApp:
         self._set_busy(False)
         self._set_runtime(f"Runtime: {result.provider}")
 
+        # Release the previous render before writing the new one. The mixer
+        # keeps a handle on the file it is playing, and on Windows that blocks
+        # overwriting it - which is what made the *second* Generate silently
+        # fail and the third one freeze on "Preparing...".
+        self.player.unload()
+
+        target = utils.output_dir() / utils.default_filename(".wav")
         try:
-            target = utils.output_dir() / utils.default_filename(".wav")
             audio_io.write_wav(target, result.samples, result.sample_rate)
             self._current_wav = target
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
+            # soundfile.LibsndfileError is a RuntimeError, not an OSError, so
+            # catching only OSError let this escape into the timer callback.
             utils.log_exception("Could not write the preview file", exc)
             self._current_wav = None
-            self._set_status(
-                f"Speech generated, but it could not be cached to disk: {exc}", theme.WARN
-            )
             self._set_save_buttons(False)
+            self._set_status(
+                f"Speech generated, but it could not be cached to disk.\n\n"
+                f"Close anything holding files in {utils.output_dir()} and try again."
+                f"\n\nTechnical detail: {exc}",
+                theme.WARN,
+            )
             return
 
         self._load_player(result)
@@ -791,17 +861,51 @@ class TTSApp:
 
     # -- main loop ----------------------------------------------------------- #
     def _tick(self) -> None:
+        """One timer frame: drain worker events, then advance the player.
+
+        The ``finally`` is load-bearing. This callback is scheduled with
+        ``root.after``; if an exception escapes, the whole event loop dies and
+        the window freezes on whatever status was last painted. A failure while
+        caching audio therefore used to brick the app mid-session. Re-arming the
+        timer unconditionally keeps a single bad frame from ending the run.
+        """
+        try:
+            self._tick_count += 1
+            self._drain_events()
+            self.player.poll()
+            if self.player.has_track:
+                self._set_time(self.player.position, self.player.duration)
+                if self.player.is_playing:
+                    self._suppress_scale = True
+                    if self.player.duration:
+                        self._seek.configure(
+                            value=1000.0 * self.player.position / self.player.duration
+                        )
+                    self._suppress_scale = False
+        except Exception as exc:  # pragma: no cover - last-resort guard
+            utils.log_exception("Timer frame failed", exc)
+            if self._busy:
+                # The worker may still be alive and about to queue a result;
+                # do not leave the UI stuck on "Preparing...".
+                self._cancel.set()
+        finally:
+            try:
+                self.root.after(TICK_MS, self._tick)
+            except tk.TclError:  # pragma: no cover - window is closing
+                pass
+
+    def _drain_events(self) -> None:
         while True:
             try:
                 kind, payload = self._events.get_nowait()
             except queue.Empty:
-                break
+                return
             if kind == "status":
                 self._set_status(str(payload), theme.ACCENT)
                 self._set_runtime(str(payload))
             elif kind == "chunk":
                 index, total = payload
-                self._progress.configure(value=100.0 * index / max(1, total))
+                self._show_progress(100.0 * index / max(1, total))
             elif kind == "done":
                 self._finish(payload)
             elif kind == "error":
@@ -811,20 +915,6 @@ class TTSApp:
                 else:
                     self._fail(str(payload))
 
-        if self._busy:
-            self._progress.configure(value=max(0.0, self._progress["value"]))
-        self.player.poll()
-        if self.player.has_track:
-            self._set_time(self.player.position, self.player.duration)
-            if self.player.is_playing:
-                self._suppress_scale = True
-                if self.player.duration:
-                    self._seek.configure(
-                        value=1000.0 * self.player.position / self.player.duration
-                    )
-                self._suppress_scale = False
-        self.root.after(TICK_MS, self._tick)
-
     # -- shutdown ------------------------------------------------------------ #
     def _save_config(self) -> None:
         try:
@@ -832,7 +922,11 @@ class TTSApp:
             x, y = self.root.winfo_x(), self.root.winfo_y()
             if width > 1 and height > 1:
                 self.config.set_window(width, height, x, y)
-            self.config.voice = self.config.voice
+            # Read the widgets rather than trusting config, so a selection made
+            # while the controls were disabled is still persisted.
+            voice = self._voice_combo.get().strip()
+            if voice:
+                self.config.voice = voice
             self.config.save()
         except Exception as exc:  # pragma: no cover - never block exit
             utils.log_exception("Could not save settings", exc)

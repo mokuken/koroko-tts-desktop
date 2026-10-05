@@ -286,6 +286,173 @@ def main() -> int:
         "cancel" in app._status_label.cget("text").lower(),
         f"status reflects cancellation ({app._status_label.cget('text')!r})",
     )
+    check(
+        not app._progress.winfo_manager(),
+        "progress bar hides after cancelling",
+    )
+
+    print("\n--- repeat generation with different voices (the reported bug) ---")
+    app._text.delete("1.0", "end")
+    app._text.insert("1.0", "Hello world. This is a narration test.")
+    app._on_modified()
+    settle(app)
+
+    fingerprints: dict[str, str] = {}
+    cached_files: list[Path] = []
+    for voice in ["F1", "F2", "F3"]:
+        app._voice_combo.set(voice)
+        app._on_voice_selected()
+        root.update()
+        app._on_generate()
+        check(app._busy, f"generation started for {voice}")
+        check(
+            app._progress.winfo_manager(),
+            f"progress bar is visible while generating {voice}",
+        )
+        deadline = time.time() + 180
+        while app._busy and time.time() < deadline:
+            root.update()
+            time.sleep(0.05)
+        root.update()
+        check(not app._busy, f"generation for {voice} finished instead of hanging")
+        check(
+            not app._progress.winfo_manager(),
+            f"progress bar hid itself after {voice} finished",
+        )
+        check(
+            app._result is not None and app._result.voice == voice,
+            f"result reports the requested voice {voice} "
+            f"(got {app._result.voice if app._result else None})",
+        )
+        check(
+            app._current_wav is not None and app._current_wav.is_file(),
+            f"render for {voice} was cached to disk",
+        )
+        check(
+            str(app._save_wav_btn["state"]) == "normal",
+            f"Save WAV is enabled after {voice}",
+        )
+        if app._result is not None:
+            import hashlib
+
+            fingerprints[voice] = hashlib.sha256(
+                app._result.samples.tobytes()
+            ).hexdigest()[:12]
+        if app._current_wav is not None:
+            cached_files.append(app._current_wav)
+        # Play briefly so the mixer holds a handle on the cached file.
+        app._on_play_toggle()
+        for _ in range(5):
+            root.update()
+            time.sleep(0.05)
+
+    check(
+        len(set(fingerprints.values())) == len(fingerprints),
+        f"each voice rendered different audio ({fingerprints})",
+    )
+    check(
+        len(set(cached_files)) == len(cached_files),
+        "each render went to its own file (no overwrite)",
+    )
+    check(
+        not list(utils.output_dir().glob("*.tmp")),
+        "no temporary files left in the output folder",
+    )
+
+    print("\n--- progress rail lives in the footer ---")
+    footer = app._status_label.master
+    check(
+        app._progress.master is footer,
+        "progress bar is a child of the footer bar, not the content area",
+    )
+    fresh = TTSApp(tk.Tk())
+    try:
+        check(
+            not fresh._progress.winfo_manager(),
+            "progress bar is not mapped by the constructor (no empty rail on launch)",
+        )
+    finally:
+        fresh._on_close()
+    check(
+        not app._progress.winfo_manager(),
+        "progress bar is hidden when idle",
+    )
+    check(
+        app._progress.value == 0.0,
+        f"progress bar starts at zero (got {app._progress.value})",
+    )
+    check(
+        app._status_label.cget("text") != "Preparing...",
+        f"footer is not showing a stale status ({app._status_label.cget('text')!r})",
+    )
+    height = app._progress.winfo_reqheight()
+    check(0 < height <= 6, f"progress bar is a thin strip ({height}px)")
+
+    # It must appear while generating and vanish again when finished.
+    app._show_progress(42.0)
+    root.update()
+    check(app._progress.winfo_manager(), "progress bar appears when generating")
+    check(
+        app._progress.value == 42.0,
+        f"progress bar tracks chunk progress ({app._progress.value})",
+    )
+    coords = app._progress.coords(app._progress._fill)
+    check(
+        coords[2] > 0,
+        f"progress bar is actually painted ({coords[2]:.0f}px filled)",
+    )
+    check(
+        app._status_label in footer.pack_slaves(),
+        "status label still sits in the footer alongside the rail",
+    )
+    app._hide_progress()
+    root.update()
+    check(not app._progress.winfo_manager(), "progress bar hides again when done")
+    check(
+        app._progress.value == 0.0,
+        "progress bar resets to zero when hidden",
+    )
+
+    print("\n--- the timer survives a failing frame ---")
+    # A raised exception here used to escape the root.after callback, killing
+    # the event loop and leaving the window frozen on "Preparing...".
+    original_drain = app._drain_events
+
+    def exploding_drain() -> None:
+        raise RuntimeError("simulated frame failure")
+
+    before = app.tick_count
+    app._drain_events = exploding_drain
+    time.sleep(0.2)
+    root.update()
+    time.sleep(0.2)
+    root.update()
+    app._drain_events = original_drain
+    root.update()
+    check(
+        app.tick_count > before,
+        f"event loop kept running after a failing frame ({before} -> {app.tick_count})",
+    )
+    check(
+        str(app._status_label.cget("text")) != "Preparing...",
+        "status is not stuck on 'Preparing...'",
+    )
+
+    print("\n--- generating still works after that failure ---")
+    app._voice_combo.set("M1")
+    app._on_voice_selected()
+    root.update()
+    app._on_generate()
+    deadline = time.time() + 180
+    while app._busy and time.time() < deadline:
+        root.update()
+        time.sleep(0.05)
+    root.update()
+    check(not app._busy, "generation recovers after the failed frame")
+    check(
+        app._result is not None and app._result.voice == "M1",
+        "recovered render uses the newly selected voice",
+    )
 
     print("\n--- missing-model view ---")
     app._build_missing_view(model_manager.ModelStatus())

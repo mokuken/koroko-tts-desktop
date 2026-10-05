@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,28 @@ log = logging.getLogger(__name__)
 PEAK_CEILING = 0.99
 
 _mp3_supported: bool | None = None
+
+
+def _atomic_write(path: Path, samples: np.ndarray, sample_rate: int) -> None:
+    """Write via a temporary file, then replace.
+
+    libsndfile opens with the plain CRT ``fopen`` and does not share the handle,
+    so overwriting a file that is still open elsewhere in this process fails on
+    Windows with an opaque ``LibsndfileError: System error``. Writing to a
+    sibling temp file and renaming sidesteps sharing entirely, and also means a
+    crash mid-write can never leave a half-written audio file behind.
+    """
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp{path.suffix}")
+    try:
+        sf.write(str(tmp), samples, sample_rate)
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave the scratch file behind, whatever went wrong.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def silence(seconds: float, sample_rate: int) -> np.ndarray:
@@ -83,7 +106,7 @@ def trim_silence(
 def write_wav(path: str | Path, samples: np.ndarray, sample_rate: int) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(path), np.asarray(samples, dtype=np.float32).reshape(-1), sample_rate)
+    _atomic_write(path, np.asarray(samples, dtype=np.float32).reshape(-1), sample_rate)
     log.info("Wrote %s (%.1f s)", path, samples.size / float(sample_rate))
     return path
 
@@ -107,7 +130,7 @@ def write_mp3(path: str | Path, samples: np.ndarray, sample_rate: int) -> Path:
         raise RuntimeError("MP3 export is not available in this build.")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(path), np.asarray(samples, dtype=np.float32).reshape(-1), sample_rate)
+    _atomic_write(path, np.asarray(samples, dtype=np.float32).reshape(-1), sample_rate)
     log.info("Wrote %s", path)
     return path
 

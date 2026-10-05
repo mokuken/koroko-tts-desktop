@@ -6,6 +6,7 @@ No third-party test runner required.
 
 from __future__ import annotations
 
+import datetime
 import json
 import sys
 import tempfile
@@ -367,6 +368,66 @@ class TestAudioOutput(unittest.TestCase):
         self.assertAlmostEqual(float(joined[125]), 0.0, places=6)
         self.assertAlmostEqual(float(joined[200]), 1.0, places=6)
 
+    def test_writing_is_atomic_and_leaves_nothing_behind_when_locked(self):
+        """Regression: the second Generate used to fail to cache its audio.
+
+        libsndfile opens with plain ``fopen``, and so does the audio player, so
+        Windows blocks rewriting a render the mixer still holds - surfacing as
+        an opaque ``LibsndfileError: System error``. Caching therefore goes
+        through a temp file (never corrupting the previous render) and the GUI
+        releases the player first; if the destination is still locked the write
+        must fail cleanly, with no scratch file left over.
+        """
+        import soundfile as sf
+
+        first = np.full(1000, 0.25, dtype=np.float32)
+        second = np.full(1000, -0.75, dtype=np.float32)
+        target = self.dir / "cached.wav"
+        audio_io.write_wav(target, first, 44100)
+
+        # Case 1: destination is released (the normal path after unload()).
+        audio_io.write_wav(target, second, 44100)
+        data, _ = sf.read(str(target))
+        self.assertAlmostEqual(float(data[0]), -0.75, delta=0.01)
+
+        # Case 2: destination still held open -> clean failure, no debris.
+        held = open(target, "rb")
+        try:
+            with self.assertRaises((OSError, RuntimeError)):
+                audio_io.write_wav(target, first, 44100)
+        finally:
+            held.close()
+        self.assertEqual(list(self.dir.glob("*.tmp")), [], "temp file was not cleaned up")
+
+        # The previously written render must be intact and still readable.
+        data, _ = sf.read(str(target))
+        self.assertAlmostEqual(float(data[0]), -0.75, delta=0.01)
+
+    def test_failed_write_leaves_no_temp_file_behind(self):
+        target = self.dir / "cached.wav"
+        with patch.object(audio_io.sf, "write", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                audio_io.write_wav(target, np.zeros(10, dtype=np.float32), 44100)
+        self.assertEqual(list(self.dir.glob("*.tmp")), [])
+        self.assertFalse(target.exists())
+
+    def test_generated_filenames_are_second_resolution(self):
+        """Regression: minute resolution made every render in a minute collide.
+
+        A second Generate rewrote the first render's file, which is what broke
+        voice switching (and then froze the app on "Preparing...").
+        """
+        stamp = utils.default_filename(".wav")
+        self.assertRegex(stamp, r"^narration_\d{4}-\d{2}-\d{2}_\d{6}\.wav$")
+
+        # Freezing the clock proves the whole minute stays distinguishable.
+        frozen = datetime.datetime(2026, 1, 1, 9, 30, 0)
+        names = {
+            (frozen + datetime.timedelta(seconds=s)).strftime("%Y-%m-%d_%H%M%S")
+            for s in range(60)
+        }
+        self.assertEqual(len(names), 60, "timestamps must not repeat within a minute")
+
     def test_join_of_nothing_is_empty(self):
         self.assertEqual(audio_io.join_parts([], 44100).size, 0)
         self.assertEqual(audio_io.join_parts([(np.zeros(0, np.float32), 0.2)], 44100).size, 0)
@@ -446,7 +507,7 @@ class TestUtils(unittest.TestCase):
         name = utils.default_filename(".wav")
         self.assertTrue(name.startswith("narration_"), name)
         self.assertTrue(name.endswith(".wav"), name)
-        self.assertRegex(name, r"^narration_\d{4}-\d{2}-\d{2}_\d{4}\.wav$")
+        self.assertRegex(name, r"^narration_\d{4}-\d{2}-\d{2}_\d{6}\.wav$")
 
     def test_format_size(self):
         self.assertEqual(utils.format_size(512), "512 B")

@@ -31,3 +31,7 @@ pyinstaller>=6.10.0
 # Optional: lets download_model.py fetch the model from Hugging Face.
 # Prebuilt app already contains the models folder, so you can skip this.
 huggingface_hub>=0.30.0
+
+# Optional: only for tools/shot.py, which saves screenshots of the window for
+# eyeballing the footer progress rail. Never imported by the app itself.
+pillow>=10.0.0
