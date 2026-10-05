@@ -1,0 +1,33 @@
+# Supertonic TTS - runtime dependencies
+#
+# Only these five packages are needed. There is no server, no Electron, no
+# Node.js, no Docker and no FFmpeg: MP3 export is handled by libsndfile, which
+# ships inside soundfile.
+#
+#   pip install -r requirements.txt
+#
+# Python 3.11 or 3.12 is recommended (3.10+ works).
+
+# Inference runtime. Supertonic's reference implementation pins 1.23.1.
+onnxruntime==1.23.1
+
+# Array maths used by the ONNX pipeline.
+numpy>=1.26.0,<3
+
+# WAV reading/writing plus MP3 encoding (libsndfile >= 1.2).
+soundfile>=0.12.1
+
+# Audio playback (play / pause / stop / seek). Bundles its own SDL DLLs.
+pygame>=2.5.0
+
+# ---------------------------------------------------------------------------
+# Everything below is only needed to BUILD the portable .exe, or to fetch the
+# model files. Neither is required to run the finished portable app.
+# ---------------------------------------------------------------------------
+
+# Packaging: build_windows.bat uses this.
+pyinstaller>=6.10.0
+
+# Optional: lets download_model.py fetch the model from Hugging Face.
+# Prebuilt app already contains the models folder, so you can skip this.
+huggingface_hub>=0.30.0

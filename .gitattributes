@@ -1,0 +1,22 @@
+# Normalise line endings so the repo is consistent regardless of
+# which machine (Windows / Linux / macOS) clones or edits it.
+* text=auto eol=lf
+
+# Windows-native scripts and the PyInstaller spec keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+SupertonicTTS.spec text eol=crlf
+
+# Binary assets, should never be line-ending translated.
+*.onnx binary
+*.wav binary
+*.mp3 binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pyd binary
+
+# Model weights are large and separately licensed - see LICENSES/README.md.
+# (Excluded here as well as in .gitignore so the rule travels with clones.)
+models/supertonic/** binary -diff
+models/supertonic/** export-ignore

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+*.manifest
+
+# Runtime artifacts (regenerated on every launch)
+logs/*.log
+logs/*.log.*
+output/*.wav
+output/*.mp3
+config.json
+config.json.corrupt
+
+# Model weights are large and separately licensed - see LICENSES/README.md
+models/supertonic/
+models/**/*.onnx
+models/**/*.json
+!models/.gitkeep
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
